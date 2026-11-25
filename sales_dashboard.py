@@ -19,14 +19,13 @@ How a "booking" is counted
     - Every other job counts (inc. German cockroach Treatment 2, warranty
       inspections, etc.).
 
-Run it every hour, 7am-7pm, with Windows Task Scheduler. Hourly runs make sure
-the person who made the booking is credited before anyone else edits it.
+Lives in ~/wkt-retention on the Lightsail server. Cron runs it hourly, 7am-7pm.
 
-First run:  python sales_dashboard.py --seed
+First run:  ~/venv/bin/python sales_dashboard.py --seed
             (marks every job ALREADY booked as "seen", so history isn't
              counted as new bookings. Run this once only.)
-Every run:  python sales_dashboard.py
-Check GST:  python sales_dashboard.py --check-job 12345
+Every run:  ~/venv/bin/python sales_dashboard.py
+Check GST:  ~/venv/bin/python sales_dashboard.py --check-job 12345
             (prints what the script reads as the total for job #12345, so
              you can compare with the Billing tab in ServiceM8)
 """
@@ -44,22 +43,29 @@ import requests
 from google.oauth2.service_account import Credentials
 
 # ============================================================
-# SETTINGS - fill these in
+# SETTINGS
+# Keys come from ~/wkt-retention/.env (same file the retention bot uses):
+#   SM8_API_KEY=...          (already there)
+#   RC_CLIENT_ID=...         (add)
+#   RC_CLIENT_SECRET=...     (add)
+#   RC_JWT=...               (add)
 # ============================================================
+from pathlib import Path
+HERE = Path(__file__).resolve().parent
+try:
+    from dotenv import load_dotenv
+    load_dotenv(HERE / ".env")
+except ImportError:
+    pass
 
-# ServiceM8 API key (same one your other scripts use)
-SM8_API_KEY = os.environ.get("SM8_API_KEY", "PASTE_SM8_API_KEY")
-
-# RingCentral app (see SETUP.md). JWT credential, client id + secret.
-RC_CLIENT_ID = os.environ.get("RC_CLIENT_ID", "PASTE_CLIENT_ID")
-RC_CLIENT_SECRET = os.environ.get("RC_CLIENT_SECRET", "PASTE_CLIENT_SECRET")
-RC_JWT = os.environ.get("RC_JWT", "PASTE_JWT")
+SM8_API_KEY = os.getenv("SM8_API_KEY", "")
+RC_CLIENT_ID = os.getenv("RC_CLIENT_ID", "")
+RC_CLIENT_SECRET = os.getenv("RC_CLIENT_SECRET", "")
+RC_JWT = os.getenv("RC_JWT", "")
 RC_SERVER = "https://platform.ringcentral.com"
 
-# Google: service account JSON (same one the Demand Database bot uses)
-GOOGLE_SA_FILE = os.environ.get("GOOGLE_SA_FILE", "service_account.json")
-# WKT Demand Database + the tab the dashboard goes in
-DASHBOARD_SHEET_ID = "1ZYlZqqL2fNN1--t282adwLe1vnUfaEUIOjsaQDViWjU"
+GOOGLE_SA_FILE = os.getenv("GSHEET_CREDS", str(HERE / "gcp-service-account.json"))
+DASHBOARD_SHEET_ID = os.getenv("SHEET_ID", "1ZYlZqqL2fNN1--t282adwLe1vnUfaEUIOjsaQDViWjU")
 DASHBOARD_TAB = "Sales Dashboard"
 
 # Phone reps: name -> ServiceM8 staff UUID + RingCentral extension NUMBER
@@ -80,8 +86,7 @@ TOTAL_IS_EX_GST = False
 # How many past days of dials to refresh each run
 DIAL_DAYS_TO_REFRESH = 3
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "dashboard_state.json")
+STATE_FILE = str(HERE / "dashboard_state.json")
 BRISBANE = timezone(timedelta(hours=10))  # no daylight saving in QLD
 
 # ============================================================
@@ -233,7 +238,7 @@ def collect_new_bookings(state, staff_names):
         job = sm8_job(job_uuid)
         if is_fixup(job, sm8_job_items(job_uuid)):
             continue
-        who = a.get("edit_by_staff_uuid") or ""
+        who = a.get("allocated_by_staff_uuid") or a.get("edit_by_staff_uuid") or ""
         rep = rep_by_uuid.get(who)
         if rep is None:
             if not INCLUDE_OTHER_STAFF:
