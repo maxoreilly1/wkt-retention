@@ -68,14 +68,15 @@ GOOGLE_SA_FILE = os.getenv("GSHEET_CREDS", str(HERE / "gcp-service-account.json"
 DASHBOARD_SHEET_ID = os.getenv("SHEET_ID", "1ZYlZqqL2fNN1--t282adwLe1vnUfaEUIOjsaQDViWjU")
 DASHBOARD_TAB = "Sales Dashboard"
 
-# Phone reps: name -> ServiceM8 staff UUID + RingCentral extension NUMBER
-# (the short number, e.g. "104"). Add new reps here.
+# Phone reps: name -> ServiceM8 staff UUID + their name exactly as RingCentral shows it.
+# Add new reps here.
 REPS = {
-    # "Jesse Lyle": {"sm8_uuid": "xxxxxxxx-....", "rc_ext": "104"},
+    "Nathan Jensen": {"sm8_uuid": "6167d436-2284-446b-bf6d-223e48de1b7a", "rc_name": "Nathan Jensen"},
+    "Jesse Lal":     {"sm8_uuid": "01a20635-d7df-785b-93ba-5aa6078d558b", "rc_name": "Jesse Lal"},
 }
 
 # Show bookings made by people NOT in REPS (office, techs) as "Other: <name>"?
-INCLUDE_OTHER_STAFF = True
+INCLUDE_OTHER_STAFF = False
 
 # Jobs whose item names or description contain any of these are fix-ups
 FIXUP_KEYWORDS = ["fixup", "fix up", "fix-up"]
@@ -149,33 +150,21 @@ def rc_get(token, path, params=None):
     return r.json()
 
 
-def rc_extension_ids(token):
-    """extension number ('104') -> extension id"""
-    out, page = {}, 1
-    while True:
-        d = rc_get(token, "/restapi/v1.0/account/~/extension",
-                   {"perPage": 1000, "page": page})
-        for e in d.get("records", []):
-            out[str(e.get("extensionNumber"))] = e["id"]
-        if page >= d.get("paging", {}).get("totalPages", 1):
-            return out
-        page += 1
-
-
-def rc_outbound_calls_by_day(token, ext_id, day_from, day_to):
-    """Count outbound voice calls per local date for one extension."""
+def rc_outbound_calls_by_name(token, day_from, day_to):
+    """Outbound voice calls per caller name per local date, from the account call log."""
     start = datetime.combine(day_from, datetime.min.time(), BRISBANE)
     end = datetime.combine(day_to + timedelta(days=1), datetime.min.time(), BRISBANE)
-    counts, page = defaultdict(int), 1
+    counts, page = defaultdict(lambda: defaultdict(int)), 1
     while True:
-        d = rc_get(token, f"/restapi/v1.0/account/~/extension/{ext_id}/call-log", {
+        d = rc_get(token, "/restapi/v1.0/account/~/call-log", {
             "direction": "Outbound", "type": "Voice", "view": "Simple",
             "dateFrom": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "dateTo": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "perPage": 1000, "page": page})
         for c in d.get("records", []):
+            name = (c.get("from") or {}).get("name") or ""
             t = datetime.fromisoformat(c["startTime"].replace("Z", "+00:00"))
-            counts[t.astimezone(BRISBANE).date().isoformat()] += 1
+            counts[name][t.astimezone(BRISBANE).date().isoformat()] += 1
         if not d.get("navigation", {}).get("nextPage"):
             return counts
         page += 1
@@ -261,18 +250,14 @@ def collect_dials(state):
     if not REPS:
         return
     token = rc_token()
-    ext_ids = rc_extension_ids(token)
     today = datetime.now(BRISBANE).date()
     day_from = today - timedelta(days=DIAL_DAYS_TO_REFRESH - 1)
+    counts = rc_outbound_calls_by_name(token, day_from, today)
     for rep, cfg in REPS.items():
-        ext_id = ext_ids.get(str(cfg.get("rc_ext")))
-        if not ext_id:
-            print(f"  ! RingCentral extension {cfg.get('rc_ext')} not found for {rep}")
-            continue
-        counts = rc_outbound_calls_by_day(token, ext_id, day_from, today)
+        by_day = counts.get(cfg.get("rc_name", rep), {})
         for i in range(DIAL_DAYS_TO_REFRESH):
             d = (day_from + timedelta(days=i)).isoformat()
-            state["dials"].setdefault(d, {})[rep] = counts.get(d, 0)
+            state["dials"].setdefault(d, {})[rep] = by_day.get(d, 0)
 
 
 def write_sheet(state):
